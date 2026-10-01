@@ -357,6 +357,7 @@ pub(crate) fn spawn_player(
     let objects = crate::settings::Settings::load().collision_objects;
     vehicle.collision = objects.then(|| world.collision.lock().clone());
     vehicle.wheel_walls = objects;
+    vehicle.ode_contacts = crate::settings::Settings::load().collision_ode || args.physics == "ode";
     // a rail vehicle rides the track (its position comes from the rails, not the tyres)
     let rail_bound = crate::rail_drive::is_rail(&vt.def);
     if rail_bound {

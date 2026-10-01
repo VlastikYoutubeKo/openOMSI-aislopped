@@ -684,6 +684,7 @@ fn gameplay_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) ->
     sel_setting(ui, s, dirty, "s-maint", c.row(), "Maintenance", "maintenance", &[("0", "Infinite (no wear)"), ("1", "Very bad"), ("2", "Bad"), ("3", "Normal"), ("4", "Good")]);
     toggle_setting(ui, s, dirty, c.row(), "Collisions with vehicles", "collision_vehicles");
     toggle_setting(ui, s, dirty, c.row(), "Collisions with objects (walls, poles)", "collision_objects");
+    toggle_setting(ui, s, dirty, c.row(), "Collisions bounce and slide as in OMSI (ODE)", "collision_ode");
     toggle_setting(ui, s, dirty, c.row(), "Collisions with people", "collision_pedestrians");
     toggle_setting(ui, s, dirty, c.row(), "Start at the real time", "use_real_time");
     toggle_setting(ui, s, dirty, c.row(), "Start on today's date", "use_real_date");
@@ -2148,7 +2149,7 @@ mod settings_tests {
         let sound = vec!["s-vol", "s-volai", "s-volsc", "set-doppler", "s-voices"];
         let gameplay = vec![
             "s-board", "set-exact_fare", "s-pax", "set-get_up", "s-unsched", "s-maxsched", "s-maxpark",
-            "s-maint", "set-collision_vehicles", "set-collision_objects", "set-collision_pedestrians", "set-use_real_time", "set-use_real_date", "s-timespeed",
+            "s-maint", "set-collision_vehicles", "set-collision_objects", "set-collision_ode", "set-collision_pedestrians", "set-use_real_time", "set-use_real_date", "s-timespeed",
         ];
         let general = vec![
             "s-lang", "set-machine_translation", "s-uiscale", "set-ui_scale_window", "s-uiop", "set-tooltips", "set-show_fps", "set-notes", "set-chat", "set-name_tags",
