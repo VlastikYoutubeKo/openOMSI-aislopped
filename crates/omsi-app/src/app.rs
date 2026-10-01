@@ -844,6 +844,7 @@ impl App {
             // (OMSI's [no_collision]: no solid object stops the bus)
             p.vehicle.collision = self.settings.collision_objects.then(|| w.collision.lock().clone());
             p.vehicle.wheel_walls = self.settings.collision_objects;
+            p.vehicle.ode_contacts = self.settings.collision_ode || self.args.physics == "ode";
         }
         match self.traffic.as_mut() {
             Some(t) => {
