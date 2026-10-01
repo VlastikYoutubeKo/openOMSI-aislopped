@@ -1,4 +1,6 @@
-//! Updates from the project's GitHub releases (github.com/openOMSI-Project/openOMSI).
+//! Updates from the project's GitHub releases (github.com/VlastikYoutubeKo/openOMSI-aislopped - this is the
+//! fork's branch: its builds update from the fork's own releases, not from upstream's,
+//! which would take the fork's changes away again).
 //!
 //! Every push to main publishes a release `v<MAJOR.MINOR.COMMIT>` with one archive per
 //! platform (see .github/workflows/release.yml). The launcher asks the GitHub API for the
@@ -31,9 +33,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// The project on GitHub.
-pub const REPO: &str = "openOMSI-Project/openOMSI";
-pub const REPO_URL: &str = "https://github.com/openOMSI-Project/openOMSI";
-const LATEST_API: &str = "https://api.github.com/repos/openOMSI-Project/openOMSI/releases/latest";
+pub const REPO: &str = "VlastikYoutubeKo/openOMSI-aislopped";
+pub const REPO_URL: &str = "https://github.com/VlastikYoutubeKo/openOMSI-aislopped";
+const LATEST_API: &str = "https://api.github.com/repos/VlastikYoutubeKo/openOMSI-aislopped/releases/latest";
 
 /// A release newer than this build, with the file for this platform.
 #[derive(Clone, Debug, PartialEq)]

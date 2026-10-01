@@ -6,7 +6,7 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, aislopped]
   pull_request:
   workflow_dispatch:
 
