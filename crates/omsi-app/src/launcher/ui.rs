@@ -792,18 +792,18 @@ impl Ui {
         *value != before
     }
 
-    /// Hours and minutes with arrows (and the wheel over either).
+    /// Hours and minutes with arrows (and the wheel over either), minutes one at a time.
     pub fn time_field(&mut self, name: &str, r: Rect, minutes: &mut i32) -> bool {
         let before = *minutes;
         self.p().rounded(r, 6.0, FIELD);
         self.p().rounded_border(r, 6.0, 1.0, EDGE);
         let half = (r.w - 16.0) * 0.5;
-        for (k, (unit, step)) in [(60, 60), (1, 5)].iter().enumerate() {
+        for (k, (unit, step)) in [(60, 60), (1, 1)].iter().enumerate() {
             let cell = Rect::new(r.x + k as f32 * (half + 16.0), r.y, half, r.h);
             let id = id_of(&format!("{name}.{k}"));
             let (h, _, _) = self.interact(id, cell);
             if h && self.input.wheel.y.abs() > 0.0 && !self.wheel_taken && !self.input.touch {
-                *minutes += self.input.wheel.y.signum() as i32 * if *unit == 60 { 60 } else { 5 };
+                *minutes += self.input.wheel.y.signum() as i32 * if *unit == 60 { 60 } else { 1 };
                 self.wheel_taken = true;
             }
             let v = if *unit == 60 { minutes.rem_euclid(1440) / 60 } else { minutes.rem_euclid(60) };
