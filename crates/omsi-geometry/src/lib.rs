@@ -648,9 +648,10 @@ pub fn build_height_profile_mesh(def: &Spline, curve: &SplineCurve, mirror: bool
                 Some(d) if hp.z0.min(hp.z1) > d + PHANTOM_LIFT => (d, d),
                 _ => (hp.z0, hp.z1),
             };
+            let Some((x0, x1, z0, z1)) = trim_to_drawn(def, hp.x0, hp.x1, z0, z1) else { continue };
             for i in 0..=n {
                 let s = curve.length * i as f64 / n as f64;
-                for (x, z) in [(hp.x0, z0), (hp.x1, z1)] {
+                for (x, z) in [(x0, z0), (x1, z1)] {
                     let (p, _) = skewed_point(curve, s, x as f64 * sign, z as f64);
                     mesh.positions.push((p - origin).as_vec3());
                     mesh.normals.push(Vec3::Z);
@@ -697,6 +698,56 @@ fn drawn_height(def: &Spline, xa: f32, xb: f32) -> Option<f32> {
         }
     }
     best
+}
+
+/// How far past the outermost point a spline draws its height profile may still stand higher
+/// than the drawn edge there (see [`trim_to_drawn`]).
+const PAST_DRAWN: f32 = 0.5;
+
+/// The part of a height profile (x0..x1 at z0..z1) wheels meet. A spline that draws a road
+/// or a pavement and lays raised surfaces well beyond it lays them on whatever lies there:
+/// the p3ta pack's `asfalt_5_rozbita` draws 5 m of road and adds 25 cm bands 5.5 to 10.5 m
+/// out on both sides, `chodnik_asfalt_2m` draws a 2.3 m pavement and raises 2.3 m of the
+/// road beside it by 10 cm, with a 25 cm band beyond - across every road next to them, an
+/// invisible step that put one side of a bus up in the air. Past the drawn edge by more
+/// than [`PAST_DRAWN`], what stands higher than that edge is cut off; a surface at the
+/// drawn edge's height (a road's shoulder) stays, and so does every profile of a spline
+/// that draws nothing (an invisible footway). None: nothing of it is left.
+fn trim_to_drawn(def: &Spline, x0: f32, x1: f32, z0: f32, z1: f32) -> Option<(f32, f32, f32, f32)> {
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    let (mut z_lo, mut z_hi) = (0.0f32, 0.0f32);
+    for p in def.profiles.iter().flat_map(|p| p.points.iter()) {
+        // (at the outermost x the lowest point: a kerb's face ends on the road)
+        if p.x < lo - 1e-4 {
+            (lo, z_lo) = (p.x, p.z);
+        } else if (p.x - lo).abs() <= 1e-4 {
+            z_lo = z_lo.min(p.z);
+        }
+        if p.x > hi + 1e-4 {
+            (hi, z_hi) = (p.x, p.z);
+        } else if (p.x - hi).abs() <= 1e-4 {
+            z_hi = z_hi.min(p.z);
+        }
+    }
+    if lo > hi {
+        return Some((x0, x1, z0, z1));
+    }
+    let (a, za, b, zb) = if x0 <= x1 { (x0, z0, x1, z1) } else { (x1, z1, x0, z0) };
+    let at = |x: f32| if (b - a).abs() < 1e-6 { za } else { za + (zb - za) * (x - a) / (b - a) };
+    let (mut a2, mut b2) = (a, b);
+    let left = lo - PAST_DRAWN;
+    if a < left && za.max(at(left.min(b))) > z_lo + 0.02 {
+        a2 = left;
+    }
+    let right = hi + PAST_DRAWN;
+    if b > right && zb.max(at(right.max(a))) > z_hi + 0.02 {
+        b2 = right;
+    }
+    if b2 - a2 < 1e-3 {
+        return None;
+    }
+    let (za2, zb2) = (at(a2), at(b2));
+    Some(if x0 <= x1 { (a2, b2, za2, zb2) } else { (b2, a2, zb2, za2) })
 }
 
 /// A height profile that is the top of a wall: a strip narrower than a wheel could stand on
@@ -1143,6 +1194,31 @@ mod tests {
         let m = build_height_profile_mesh(&def, &c, true, DVec3::ZERO);
         let lo = m.positions.iter().map(|p| p.x).fold(f32::MAX, f32::min);
         assert!((lo - 2.5).abs() < 1e-4, "{lo}");
+    }
+
+    /// The p3ta pack's pavement and road: raised surfaces far beyond what they draw are cut
+    /// off, the road's shoulder at road level stays.
+    #[test]
+    fn height_profiles_far_past_the_drawn_edge_are_cut_off() {
+        use omsi_scenery::sli::{HeightProfile, SplineProfile, SplineProfilePoint};
+        let pt = |x: f32, z: f32| SplineProfilePoint { x, z, u: 0.0, v_scale: 0.5 };
+        let hp = |x0: f32, x1: f32, z: f32| HeightProfile { x0, x1, z0: z, z1: z };
+        // chodnik_asfalt_2m: kerbs at +-1.15 (0 .. 0.15), the pavement at 0.15
+        let mut pav = Spline::default();
+        pav.profiles.push(SplineProfile { texture: 0, points: vec![pt(-1.15, 0.0), pt(-1.15, 0.15), pt(-1.0, 0.15)] });
+        pav.profiles.push(SplineProfile { texture: 1, points: vec![pt(-1.0, 0.15), pt(1.0, 0.15)] });
+        pav.profiles.push(SplineProfile { texture: 0, points: vec![pt(1.15, 0.15), pt(1.15, 0.0)] });
+        assert_eq!(trim_to_drawn(&pav, -6.5, -3.5, 0.25, 0.25), None, "the 25 cm band across the road");
+        assert_eq!(trim_to_drawn(&pav, -3.5, 3.75, 0.1, 0.1), Some((-1.65, 1.65, 0.1, 0.1)));
+        // asfalt_5_rozbita: 5 m drawn at 0.10; the surface at road level to +-5.5 stays
+        let mut road = Spline::default();
+        road.profiles.push(SplineProfile { texture: 0, points: vec![pt(-2.5, 0.1), pt(2.5, 0.1)] });
+        assert_eq!(trim_to_drawn(&road, -5.5, 5.5, 0.1, 0.1), Some((-5.5, 5.5, 0.1, 0.1)));
+        assert_eq!(trim_to_drawn(&road, 5.5, 10.5, 0.25, 0.25), None);
+        // nothing drawn: an invisible footway keeps its surface
+        let mut none = Spline::default();
+        none.height_profiles.push(hp(0.0, 3.0, 0.2));
+        assert_eq!(trim_to_drawn(&none, 0.0, 3.0, 0.2, 0.2), Some((0.0, 3.0, 0.2, 0.2)));
     }
 
     #[test]
