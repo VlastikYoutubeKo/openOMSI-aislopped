@@ -860,6 +860,9 @@ pub struct VehicleInstance {
     /// Faces the wheels cannot climb stop the vehicle (see `RigidBody::wheel_walls`); the
     /// player's bus follows the setting for collisions with objects.
     pub wheel_walls: bool,
+    /// Obstacles answered as Omsi.exe's ODE contacts answer them (see
+    /// `RigidBody::ode_contacts`); the player's bus follows the setting.
+    pub ode_contacts: bool,
     /// Crashes so far and the energy of the latest (J), kept for logs and the HUD.
     pub crashes: u32,
     pub last_impact: f32,
@@ -1153,6 +1156,7 @@ impl VehicleInstance {
             collided: false,
             last_crash: 0.0,
             wheel_walls: true,
+            ode_contacts: false,
             crashes: 0,
             last_impact: 0.0,
             dirt: 0.0,
@@ -1580,6 +1584,7 @@ impl VehicleInstance {
                     (None, None) => &flat,
                 };
             rb.wheel_walls = self.wheel_walls;
+            rb.ode_contacts = self.ode_contacts;
             rb.step(dt, m_wheel, brakes, steer, probe);
         }
         // what the crashes of this step destroyed, and the worst of them

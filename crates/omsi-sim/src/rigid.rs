@@ -1,5 +1,8 @@
-//! Rigid-body vehicle dynamics after Omsi.exe's own (0x7e2574; OMSI uses ODE only for the
-//! objects a crash knocks over): a six-degree-of-freedom body with mass,
+//! Rigid-body vehicle dynamics after Omsi.exe's own (0x7e2574). OMSI computes the forces
+//! and the speeds itself; ODE then moves every body by them, once a frame
+//! (`dWorldStepFast1`, 0x7018ab, between `PH_PreCalc` 0x7afbd8 and `PH_PostCalc` 0x7afe44),
+//! and answers what the body runs into with contact joints (0x7adbb0) - see
+//! [`RigidBody::ode_contacts`] for those. Here: a six-degree-of-freedom body with mass,
 //! `[momentofintertia]` and `[schwerpunkt]`, wheels on spring/damper suspensions
 //! (`achse_feder`, `achse_daempfer`, `achse_maxforce`, measured where the tyres stand
 //! between `achse_minwidth` and `achse_maxwidth`, pushing from `achse_maxwidth`), every axle
@@ -103,6 +106,21 @@ const RESTITUTION: f32 = 0.2;
 const SCRAPE_FRICTION: f32 = 0.4;
 /// Below this closing speed (m/s) a touch is a push, not a crash.
 pub const CRASH_SPEED: f32 = 0.4;
+/// Omsi.exe leaves the collisions of a vehicle's body to ODE (the callback 0x7adbb0 makes a
+/// contact joint per point, `dWorldStepFast1` at 0x7018ab solves them), and gives every
+/// contact the same surface: `dContactBounce` with `bounce` 0.4 and `bounce_vel` 0.1 - four
+/// tenths of the closing speed come back, from 0.1 m/s on.
+pub const ODE_BOUNCE: f32 = 0.4;
+pub const ODE_BOUNCE_VEL: f32 = 0.1;
+/// Its `mu` is 7.0 without `dContactApprox1`: ODE then takes it as the largest friction
+/// *force* along the surface, whatever the load. OMSI's masses are tonnes, so that is 7 kN -
+/// little against a bus: it slides along a wall far more easily than a coefficient gives.
+pub const ODE_MU_FORCE: f32 = 7000.0;
+/// ODE never moves a body out of what it is in: it adds the speed that takes a share (its
+/// default error reduction, 0.2) of the depth away in one step.
+const ODE_ERP: f32 = 0.2;
+/// `dWorldSetCFM(1e-5)` (0x6e6018), per tonne: the softness of every constraint.
+const ODE_CFM: f32 = 1e-5 / 1000.0;
 
 /// The ground a wheel finds at one point: the highest face at or below the probe's top and
 /// the lowest face above it (world heights).
@@ -427,6 +445,9 @@ pub struct RigidBody {
     /// as OMSI's do - its wheels know no faces - and a step nobody sees (a height profile
     /// over the drawn road, a helper object's collision box) is no invisible wall.
     pub wheel_walls: bool,
+    /// Obstacles are answered as Omsi.exe's contact joints answer them (see [`ODE_BOUNCE`])
+    /// instead of this game's own impulses. A setting: off unless asked for.
+    pub ode_contacts: bool,
 }
 
 impl RigidBody {
@@ -478,7 +499,7 @@ impl RigidBody {
         let inv_min_turn_radius = if def.inv_min_turn_radius > 0.0 { def.inv_min_turn_radius } else { max_steer_deg.to_radians().tan() / s };
         let springs: f32 = def.axles.iter().map(|a| 2.0 * if a.spring > 0.0 { a.spring } else { 150.0 }).sum();
         let body_freq = (springs / (mass / 1000.0)).max(0.0).sqrt();
-        RigidBody { mass, inertia, cog, position: DVec3::ZERO, orientation: Quat::IDENTITY, velocity: Vec3::ZERO, omega: Vec3::ZERO, wheels, wheel_axle, steer_deg: 0.0, max_steer_deg, rot_pnt_long: def.rot_pnt_long, inv_min_turn_radius, body_freq, holding: true, rolling_resistance: if def.rolling_resistance > 0.0 { def.rolling_resistance } else { 0.008 * mass * 9.81 }, accel_body: Vec3::ZERO, friction: 0.85, wheel_impacts: Vec::new(), coupled: Vec::new(), spawned_inside: None, wheel_walls: true }
+        RigidBody { mass, inertia, cog, position: DVec3::ZERO, orientation: Quat::IDENTITY, velocity: Vec3::ZERO, omega: Vec3::ZERO, wheels, wheel_axle, steer_deg: 0.0, max_steer_deg, rot_pnt_long: def.rot_pnt_long, inv_min_turn_radius, body_freq, holding: true, rolling_resistance: if def.rolling_resistance > 0.0 { def.rolling_resistance } else { 0.008 * mass * 9.81 }, accel_body: Vec3::ZERO, friction: 0.85, wheel_impacts: Vec::new(), coupled: Vec::new(), spawned_inside: None, wheel_walls: true, ode_contacts: false }
     }
 
     /// Place the body at rest with its wheels on the ground plane at `origin.z`: heading
@@ -1194,6 +1215,39 @@ impl RigidBody {
             // one only as far as the body itself ran into it this frame: a standing car is not
             // ploughed through, and one that drives into the bus does not drag it along
             let out = if o.mass > 0.0 { (c.depth as f32).min((-vn).max(0.0) * dt + 0.001) } else { c.depth as f32 + 0.001 };
+            if self.ode_contacts {
+                // ODE's contact joint: the speed along the normal after the step is the
+                // larger of what takes its share of the depth away and what bounces back; the
+                // body stays where it is. Along the surface the joint holds with no more than
+                // its `mu` as a force. (One point per obstacle here; ODE has up to twelve
+                // per pair, each with that bound.)
+                let h = dt.max(1e-3);
+                let mut want = ODE_ERP * out / h;
+                // (the body's own run into it: a car that drives into the bus keeps its
+                // speed here, and its approach bounced the bus off it every frame)
+                if -vn > ODE_BOUNCE_VEL {
+                    want = want.max(-ODE_BOUNCE * vn);
+                }
+                let j = ((want - vn) / (k_n + ODE_CFM / h)).max(0.0);
+                let mut p = n * j;
+                let vt = v_c - n * vn;
+                let vt = Vec3::new(vt.x, vt.y, 0.0);
+                if j > 0.0 && vt.length() > 1e-3 {
+                    let t = vt.normalize();
+                    p -= t * (vt.length() / (self.inv_mass_at(r, t) + inv_other)).min(ODE_MU_FORCE * h);
+                }
+                self.apply_impulse(r, p);
+                if j > 0.0 {
+                    // (Omsi.exe puts a vehicle that is hit into its free motion: `contact` 0)
+                    self.holding = false;
+                }
+                if vn_full < 0.0 {
+                    let e = if -vn > ODE_BOUNCE_VEL { ODE_BOUNCE } else { 0.0 };
+                    let energy = (before - self.kinetic_energy()).max(0.5 * vn_full * vn_full * (1.0 - e * e) / k_n);
+                    impacts.push(Impact { point, speed: -vn_full, energy, obstacle: i, broke: false, push: -n });
+                }
+                continue;
+            }
             self.position += (n * out).as_dvec3();
             if vn_full >= 0.0 {
                 continue;
@@ -2107,6 +2161,134 @@ mod tests {
             rb.collide(bb, &wall, &|_| false, 1.0 / 30.0);
         }
         assert!(rb.origin().y < y0 - 1.0, "{} -> {}", y0, rb.origin().y);
+    }
+
+    /// Omsi.exe's contacts (`ode_contacts`): four tenths of the closing speed come back
+    /// where this game's own answer gives a fifth, from 0.1 m/s on instead of 1 m/s, and the
+    /// body is not moved out of the wall but leaves it by its speed.
+    #[test]
+    fn ode_contacts_bounce_as_omsis_do() {
+        let def = bus();
+        let bb = def.bounding_box.unwrap();
+        let wall = [Obb::from_box([20.0, 1.0, 3.0, 0.0, 0.0, 1.5], DVec3::new(0.0, 6.2, 0.0), 0.0)];
+        let hit = |ode: bool, v: f32| {
+            let mut rb = RigidBody::from_definition(&def, &[]);
+            rb.place(DVec3::ZERO, 0.0);
+            rb.ode_contacts = ode;
+            rb.velocity = Vec3::new(0.0, v, 0.0);
+            let y0 = rb.position.y;
+            let hits = rb.collide(bb, &wall, &|_| false, 1.0 / 30.0);
+            assert_eq!(hits.len(), 1, "{hits:?}");
+            (rb.velocity.y, rb.position.y - y0, rb.holding)
+        };
+        // the front of the bus stands 0.12 m in the wall (5.83 m ahead of the origin, the
+        // wall's face at 5.7): head on, at the height of the centre of gravity
+        let (own, own_moved, _) = hit(false, 5.0);
+        let (ode, ode_moved, holding) = hit(true, 5.0);
+        assert!((own + RESTITUTION * 5.0).abs() < 0.05, "{own}");
+        assert!((ode + ODE_BOUNCE * 5.0).abs() < 0.05, "{ode}");
+        assert!(own_moved < -0.1 && ode_moved == 0.0, "{own_moved} {ode_moved}");
+        assert!(!holding);
+        // a touch at 0.5 m/s: dead for this game, a bounce for ODE - but here the speed that
+        // takes a fifth of the 0.13 m away in this frame is more than the bounce
+        let (own, _, _) = hit(false, 0.5);
+        let (ode, _, _) = hit(true, 0.5);
+        assert!(own.abs() < 0.01, "{own}");
+        assert!((ode + ODE_ERP * 0.131 * 30.0).abs() < 0.05, "{ode}");
+    }
+
+    /// ODE's `mu` is a force (7 kN a contact), not a share of the load: along a wall the bus
+    /// loses far less speed than this game's scraping friction takes.
+    #[test]
+    fn ode_contacts_slide_along_a_wall() {
+        let def = bus();
+        let bb = def.bounding_box.unwrap();
+        // a wall along the right side, the bus running along it and 3 m/s into it
+        let wall = [Obb::from_box([1.0, 60.0, 3.0, 0.0, 0.0, 1.5], DVec3::new(1.7, 0.0, 0.0), 0.0)];
+        let along = |ode: bool| {
+            let mut rb = RigidBody::from_definition(&def, &[]);
+            rb.place(DVec3::ZERO, 0.0);
+            rb.ode_contacts = ode;
+            rb.velocity = Vec3::new(3.0, 10.0, 0.0);
+            let hits = rb.collide(bb, &wall, &|_| false, 1.0 / 30.0);
+            assert_eq!(hits.len(), 1, "{hits:?}");
+            (10.0 - rb.velocity.y, rb.velocity.x)
+        };
+        let (own_lost, _) = along(false);
+        let (ode_lost, ode_x) = along(true);
+        // 7 kN for a thirtieth of a second on 12 t: 0.02 m/s
+        assert!(ode_lost > 0.0 && ode_lost < 0.03, "{ode_lost}");
+        assert!(own_lost > 10.0 * ode_lost, "{own_lost} against {ode_lost}");
+        assert!(ode_x < 0.0, "off the wall: {ode_x}");
+    }
+
+    /// The two answers side by side on the road, wheels and all (`--nocapture` prints them):
+    /// head on into a wall, along a wall, and leaning on one with the engine pushing.
+    #[test]
+    fn ode_contacts_on_the_road() {
+        let def = bus();
+        let bb = def.bounding_box.unwrap();
+        let g = road(1e9, 0.0);
+        let settled = |ode: bool, heading: f64| {
+            let mut rb = RigidBody::from_definition(&def, &[]);
+            rb.place(DVec3::ZERO, 0.0);
+            run(&mut rb, 1.0, 0.0, 5000.0, &g);
+            rb.place(DVec3::ZERO, heading);
+            run(&mut rb, 0.5, 0.0, 0.0, &g);
+            rb.ode_contacts = ode;
+            rb
+        };
+        // head on at 40 km/h, then two seconds of rolling free
+        let head_on = |ode: bool| {
+            let mut rb = settled(ode, 0.0);
+            rb.velocity = Vec3::new(0.0, 40.0 / 3.6, 0.0);
+            let wall = [Obb::from_box([20.0, 1.0, 3.0, 0.0, 0.0, 1.5], DVec3::new(0.0, 12.0, 0.0), 0.0)];
+            let (mut back, mut deepest) = (0.0f32, 0.0f64);
+            for _ in 0..90 {
+                rb.step(1.0 / 30.0, 0.0, &[0.0; 4], 0.0, &g);
+                rb.collide(bb, &wall, &|_| false, 1.0 / 30.0);
+                back = back.min(rb.forward_speed());
+                deepest = deepest.max(rb.origin().y + 5.83 - 11.5);
+            }
+            let (_, pitch, bank) = rb.heading_pitch_bank();
+            (back, deepest, pitch, bank)
+        };
+        let (own, ode) = (head_on(false), head_on(true));
+        eprintln!("head on at 40 km/h: fastest back {:.2} m/s own, {:.2} m/s ODE; deepest in the wall {:.3} m own, {:.3} m ODE", own.0, ode.0, own.1, ode.1);
+        assert!(ode.0 < own.0 - 1.0, "ODE bounces further: {ode:?} against {own:?}");
+        assert!(ode.1 < 0.5, "not through the wall: {ode:?}");
+        assert!(ode.2.abs() < 15.0 && ode.3.abs() < 15.0, "on its wheels: {ode:?}");
+        // 20 degrees into a wall along the road at 30 km/h, two seconds
+        let along = |ode: bool| {
+            let mut rb = settled(ode, 20.0);
+            rb.velocity = rb.orientation.mul_vec3(Vec3::Y) * 30.0 / 3.6;
+            let wall = [Obb::from_box([1.0, 60.0, 3.0, 0.0, 0.0, 1.5], DVec3::new(4.5, 10.0, 0.0), 0.0)];
+            let mut hits = 0;
+            for _ in 0..60 {
+                rb.step(1.0 / 30.0, 0.0, &[0.0; 4], 0.0, &g);
+                hits += rb.collide(bb, &wall, &|_| false, 1.0 / 30.0).len();
+            }
+            let (heading, _, bank) = rb.heading_pitch_bank();
+            (rb.velocity.length(), heading, bank, hits)
+        };
+        let (own, ode) = (along(false), along(true));
+        eprintln!("20 deg into a wall at 30 km/h, after 2 s: {:.2} m/s heading {:.0} own, {:.2} m/s heading {:.0} ODE ({} and {} hits)", own.0, own.1, ode.0, ode.1, own.3, ode.3);
+        assert!(ode.3 > 0 && ode.2.abs() < 15.0, "{ode:?}");
+        // standing at a wall, the engine pushing for three seconds: how far in it gets
+        let lean = |ode: bool| {
+            let mut rb = settled(ode, 0.0);
+            let wall = [Obb::from_box([20.0, 1.0, 3.0, 0.0, 0.0, 1.5], DVec3::new(0.0, 6.4, 0.0), 0.0)];
+            let mut deepest = 0.0f64;
+            for _ in 0..90 {
+                rb.step(1.0 / 30.0, 6000.0, &[0.0; 4], 0.0, &g);
+                rb.collide(bb, &wall, &|_| false, 1.0 / 30.0);
+                deepest = deepest.max(rb.origin().y + 5.83 - 5.9);
+            }
+            (deepest, rb.forward_speed())
+        };
+        let (own, ode) = (lean(false), lean(true));
+        eprintln!("pushing against a wall: {:.3} m in own, {:.3} m in ODE", own.0, ode.0);
+        assert!(ode.0 < 0.3, "held by the wall: {ode:?}");
     }
 
     /// A glancing blow on the front corner turns the bus away from the wall and lets it slide.
