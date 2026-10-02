@@ -1056,6 +1056,7 @@ impl ApplicationHandler for App {
                             }
                             // (a radio whose display is a text of its script shows the station)
                             p.vehicle.radio_text = self.radio.display_text();
+                            p.vehicle.radio_frequency = self.radio.frequency(p.vehicle.position.x, p.vehicle.position.y);
                         }
                         None => self.radio.stop(a),
                     }
