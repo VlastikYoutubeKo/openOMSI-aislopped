@@ -23,6 +23,10 @@ pub(crate) struct App {
     /// The object editor, while it is on (`crate::editor`).
     pub(crate) editor: Option<crate::editor::Editor>,
     pub(crate) vehicle_list: Vec<(String, String)>,
+    /// The drop-down open over a row of the settings window, if one is.
+    pub(crate) dropdown: Option<crate::game_lists::Dropdown>,
+    /// (manufacturer, type) of each vehicle of `vehicle_list`, by its path.
+    pub(crate) vehicle_meta: std::collections::HashMap<String, (String, String)>,
     pub(crate) world: Option<Arc<World>>,
     /// Tile streaming around the camera (the window's default).
     pub(crate) streamer: Option<tiles::Streamer>,
@@ -116,8 +120,16 @@ pub(crate) struct App {
     /// (in lines, fractional while dragged); `None`: the chosen line is kept in view.
     pub(crate) menu_top: Option<f32>,
     pub(crate) menu_scroll_drag: bool,
-    /// The game menu shows all its lines ("More..."), not only the everyday ones.
-    pub(crate) menu_more: bool,
+    /// The timetable beside the tours scrolled with the wheel: (the tour's line in the list,
+    /// the first stop shown).
+    pub(crate) pane_scroll: Option<(usize, usize)>,
+    /// The digits of a time being typed in the world page of the game menu (None: not typing).
+    pub(crate) menu_edit: Option<String>,
+    /// The line of the open list whose slider the mouse button holds (it follows the cursor).
+    pub(crate) menu_drag: Option<usize>,
+    /// The keyboard chose the line of the menu last (the mouse moved since: false), so the
+    /// chosen line is shown lit; with the mouse only the line under it is.
+    pub(crate) menu_kbd: bool,
     /// Keys pressed (true) and let go since the Lua plugins' last frame.
     pub(crate) plugin_keys: Vec<(String, bool)>,
     /// Seconds Ctrl+Shift+Page Up/Down has been held (the clock runs faster the longer).
@@ -146,6 +158,13 @@ pub(crate) struct App {
     /// speed, and at 30 km/h the edge of the screen was a third of the lock, with nowhere
     /// further to move.
     pub(crate) mouse_edge: f32,
+    /// Where the cursor steered when the right button began to look round: it goes back
+    /// there when the button is let go, so the wheel does not jump to where looking left it.
+    pub(crate) steer_cursor: Option<(f32, f32)>,
+    /// The cursor is put in the middle of the window before the mouse steers for the first
+    /// time (a game started with the mouse steering on: wherever the cursor was, the wheel
+    /// turned and the bus drove off on full throttle).
+    pub(crate) center_cursor: bool,
     /// The mouse's throttle and brake (eased in with the steering).
     pub(crate) mouse_pedals: (f32, f32),
     /// The speed mouse steering divides by, smoothed.
@@ -246,6 +265,9 @@ pub(crate) struct App {
     pub(crate) weather_blend: Option<crate::weather_cycle::Blend>,
     /// The weather cycle, when the weather chosen is `cycle`.
     pub(crate) weather_cycle: Option<crate::weather_cycle::Cycle>,
+    /// The METAR sync's download under way (see `tick_metar`), and the seconds to the next one.
+    pub(crate) metar_rx: Option<std::sync::mpsc::Receiver<Option<omsi_content::weather::Weather>>>,
+    pub(crate) metar_next: f64,
     /// The mouse cursor currently shows the hand (it is over a switch).
     pub(crate) cursor_kind: u8,
     pub(crate) settings: settings::Settings,
@@ -566,6 +588,7 @@ impl App {
                 ));
                 if let Some(n) = self.navigator.as_mut() {
                     n.arrows = self.settings.nav_arrows;
+                    n.show_ai = self.settings.nav_ai;
                 }
                 if let Some(d) = self.args.driver.as_deref() {
                     self.career = career::Career::load(&self.args.root, d);
@@ -599,9 +622,13 @@ impl App {
                 }
                 // (a player who joins draws the host's traffic in it, whatever their own count
                 // says: the host's cars had nowhere to go without it)
-                if self.args.traffic > 0 || self.args.schedule || crate::rail_drive::args_rail(&self.args) || self.args.lan_join.is_some() {
+                let populated = self.args.traffic > 0 || self.args.schedule || crate::rail_drive::args_rail(&self.args) || self.args.lan_join.is_some();
+                // Without traffic it still runs the light programs and switches the lamps:
+                // they stood frozen with red, yellow and green all lit (#727).
+                {
                     match traffic::Traffic::new(&self.args.root, &w, self.args.traffic) {
                         Ok(mut t) => {
+                            t.lights_only = !populated;
                             if let Some(lan) = self.lan.as_ref() {
                                 t.set_lan_seed(lan::population_seed(lan));
                             }

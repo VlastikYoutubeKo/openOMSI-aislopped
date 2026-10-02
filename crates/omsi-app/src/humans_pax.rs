@@ -152,6 +152,10 @@ pub(super) struct Pax {
     /// Somebody in the way (+0x6c7: 1 behind, 2 in front facing them, 3 in front going
     /// the same way or busy) and on which sides there is room (+0x6c8, +0x6c9).
     pub block: u8,
+    /// Seconds held up by somebody in front inside a bus, and seconds left passing them
+    /// (see `pax_move`).
+    pub jam: f32,
+    pub squeeze: f32,
     pub free_r: bool,
     pub free_l: bool,
     /// Complaint the bus made them leave with (+0x630).
@@ -212,6 +216,8 @@ impl Pax {
             speed: 0.0,
             walk_speed,
             block: 0,
+            jam: 0.0,
+            squeeze: 0.0,
             free_r: true,
             free_l: true,
             complaint: 0,
@@ -606,7 +612,10 @@ impl Humans {
                 self.ai_requests.push((*id, e.clone(), x.clone()));
             }
         }
-        // timetable buses wait while people still get on or off
+        // timetable buses wait while people still get on or off - for somebody on the way
+        // to the gather point only while the bus stands in the stop's box: outside it
+        // nobody walks up to the doors (`Task::ToBus`), and the bus held for them waited
+        // for good
         for bn in buses {
             let BusId::Ai(id) = bn.id else { continue };
             if bn.speed.abs() > 0.5 {
@@ -614,7 +623,12 @@ impl Humans {
             }
             let busy = self.people.iter().any(|p| match &p.state {
                 State::Pax(x) => {
-                    x.bus == Some(bn.id) && (matches!(x.task, Task::WalkingToBus | Task::ToBus) || (x.task == Task::InBusToExit && x.inside == Some(bn.id)))
+                    let coming = match x.task {
+                        Task::WalkingToBus => true,
+                        Task::ToBus => x.stop.is_some_and(|s| self.in_stop_box(s, bn.id)),
+                        _ => false,
+                    };
+                    x.bus == Some(bn.id) && (coming || (x.task == Task::InBusToExit && x.inside == Some(bn.id)))
                 }
                 _ => false,
             });
@@ -808,8 +822,27 @@ impl Humans {
             _ => {}
         }
         // the people in the way (sub_626860)
-        let (block, free_r, free_l) = if st == 1 || st == 5 { self.pax_blockers(i, buses, bus_ix) } else { (0, true, true) };
+        let (mut block, free_r, free_l) = if st == 1 || st == 5 { self.pax_blockers(i, buses, bus_ix) } else { (0, true, true) };
         let p = self.pax_mut(i).unwrap();
+        // Inside a bus, people going opposite ways along the aisle or the stairs stood face to
+        // face for good (the whole upper deck of a double-decker on its way out, the people
+        // coming up stopped on the stairs): held up for two seconds, they squeeze past for a
+        // second and a half, as the people on the pavements do.
+        if p.inside.is_some() {
+            if p.squeeze > 0.0 {
+                p.squeeze -= dt;
+                block = 0;
+            } else if block == 2 {
+                p.jam += dt;
+                if p.jam > 2.0 {
+                    p.jam = 0.0;
+                    p.squeeze = 1.5;
+                    block = 0;
+                }
+            } else {
+                p.jam = 0.0;
+            }
+        }
         p.st = st;
         p.pt = pt;
         p.link = link;
@@ -839,6 +872,15 @@ impl Humans {
             head_des = yaw_of(d.truncate());
         }
         if st == 0 {
+            // standing: still on the ground under the feet, as Omsi.exe asks for it every
+            // tick in every state but turning (0x62b852 -> 0x7aec3c, not when seated); the
+            // waiting people stood at the height of their [passpos]'s object - a shelter
+            // on the terrain - 25-35 cm down in the platform
+            if p.inside.is_none() && p.pax_state != 2.0 {
+                if let Some(g) = world.walk_height_near(p.pos.x, p.pos.y, p.pos.z) {
+                    p.pos.z = g;
+                }
+            }
             return;
         }
         let mut dh = wrap(head_des - p.yaw);
@@ -1457,8 +1499,12 @@ impl Humans {
                 }
                 return;
             }
-            if p.timer < 0.0 {
-                // standing a second: perhaps another door opened (0x62d6b1)
+            if p.timer < 0.0 && p.st != 5 {
+                // standing a second: perhaps another door opened (0x62d6b1). Once a second:
+                // with the timer left run out, the way was found afresh every frame from the
+                // nearest point, and whoever had left a point was pulled back to it - the
+                // people coming down from the upper deck never got off the stairs.
+                self.pax_mut(i).unwrap().timer = 1.0;
                 let exits = bn.cabin.exit_points();
                 let all = bn.cabin.all_points();
                 let pp = self.pax_mut(i).unwrap();

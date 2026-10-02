@@ -841,6 +841,18 @@ pub fn update_server_players(list: Vec<omsi_net::ws::PlayerInfo>) {
     }
 }
 
+/// A server run: the admin commands that came to the web gateway's `POST /admin`.
+pub fn take_local_admin() -> Vec<String> {
+    if let Ok(w) = WS_PATH.lock() {
+        if let Some(g) = w.as_ref().and_then(|w| w.gateway.as_ref()) {
+            if let Ok(mut i) = g.info.lock() {
+                return std::mem::take(&mut i.local_admin_queue);
+            }
+        }
+    }
+    Vec::new()
+}
+
 /// Joining game: reach `url` (a server's or a host's tunnel) over a WebSocket; the local
 /// address to join instead.
 fn ws_join_target(url: &str) -> Result<String, String> {
@@ -1176,6 +1188,14 @@ fn host_weather(args: &Args, weather: &str) -> Result<Option<String>, String> {
     let w = weather.trim();
     if w.is_empty() {
         return Ok(None);
+    }
+    // a METAR report's values: made into a weather here, no file and no sync of our own
+    if w.starts_with(crate::weather_setup::REPORT) {
+        return if crate::weather_setup::from_report(w).is_some() {
+            Ok(Some(w.to_string()))
+        } else {
+            Err(format!("the host's weather {w} cannot be read here"))
+        };
     }
     let path = omsi_cfg::resolve_path(&args.root, w);
     let inside = !w.contains("..") && !w.starts_with('/') && !w.contains(':');

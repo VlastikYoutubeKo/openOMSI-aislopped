@@ -957,6 +957,10 @@ pub struct Instance {
     pub object_radius: f32,
     pub detail: f32,
     pub any_distance: bool,
+    /// Drawn only while the camera stands in this area of the ground (world x0, y0, x1, y1):
+    /// a stand-in for far tiles, which OMSI has loaded only around its own tile (see
+    /// `set_near_only`).
+    pub near_only: Option<[f64; 4]>,
     /// Seen only in the mirrors and other views drawn into textures, not in the window's
     /// picture: the driver at the wheel while the player looks from the driver's seat (the
     /// figure would fill the view, but the mirrors show him as OMSI does).
@@ -1332,6 +1336,9 @@ pub struct Renderer {
     /// Sort the blended draws by origin distance alone, as before the camera-enclosing
     /// objects were drawn last (only for before/after pictures, `OMSI_BLEND_AB`).
     pub blend_by_origin: bool,
+    /// Draw the models' `[isshadow]` shadow blobs (see [`RenderOptions::shadow_blobs`]).
+    /// Settable while the game runs, so the graphics list can switch it off at once.
+    pub shadow_blobs: bool,
     /// GPU time per pass (OMSI_GPU_TIMERS, when the device has timestamp queries): the
     /// mirrors and the window's picture apart, each timed on its own.
     gpu_timers: [Option<GpuTimers>; 2],
@@ -1402,6 +1409,11 @@ pub struct RenderOptions {
     /// Only the meshes the models mark `[shadow]` cast sun shadows, as in OMSI 2 (else every
     /// solid mesh does).
     pub omsi_shadow_casters: bool,
+    /// Draw the models' `[isshadow]` shadow meshes - OMSI's flat blob under a vehicle,
+    /// standing in for the sky light the body keeps off the road (see [`Instance::blob`]).
+    /// Off, the sun shadow map is all the shading under a vehicle, and the blob (which
+    /// OMSI draws whatever the depth) cannot be seen at all.
+    pub shadow_blobs: bool,
     /// The materials' reflection maps (`[matl_envmap]`: the shine of paint, chrome and
     /// glass). Off, nothing mirrors the sky photo - some players find it too strong.
     pub reflections: bool,
@@ -1425,6 +1437,7 @@ impl Default for RenderOptions {
             min_obj_size: 0.013,
             max_obj_dist: 0.0,
             omsi_shadow_casters: false,
+            shadow_blobs: true,
             reflections: true,
             no_enhanced: false,
         }
@@ -1655,18 +1668,19 @@ impl Renderer {
             })
             .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb);
         // Every target the scene is drawn into with multisampling (the swap chain or mirror
-        // format, the HDR target of the enhanced path, the depth buffer) must take the
-        // sample count, and the colour targets must resolve. A device judges that by the
-        // WebGPU table, which promises only 1x and 4x, unless it was asked for the
-        // adapter's own table: the launcher's "2x MSAA" (which Apple GPUs do support) was
-        // a fatal validation error before the first frame because the adapter's table said
-        // yes and the device's said no. So the adapter's table is asked for when the wanted
-        // count needs it, and the count is checked against the table the device will use.
+        // format, the HDR target of the enhanced path and its screen mask, the depth buffer)
+        // must take the sample count, and the colour targets must resolve. A device judges
+        // that by the WebGPU table, which promises only 1x and 4x, unless it was asked for
+        // the adapter's own table: the launcher's "2x MSAA" (which Apple GPUs do support)
+        // was a fatal validation error before the first frame because the adapter's table
+        // said yes and the device's said no. So the adapter's table is asked for when the
+        // wanted count needs it (2x, 8x), and the count is checked against the table the
+        // device will use.
         let wanted = match options.msaa {
             1 | 2 | 4 | 8 => options.msaa,
             _ => MSAA,
         };
-        let targets = [format, wgpu::TextureFormat::Rgba16Float, DEPTH_FORMAT];
+        let targets = [format, wgpu::TextureFormat::Rgba16Float, DEPTH_FORMAT, MASK_FORMAT];
         let takes = |flags: wgpu::TextureFormatFeatureFlags, f: wgpu::TextureFormat, n: u32| {
             flags.sample_count_supported(n)
                 && (n == 1
@@ -1741,10 +1755,11 @@ impl Renderer {
         let options = RenderOptions {
             msaa,
             shadow_size,
-            // (at most 8x: at 16x the sharper mip the filter picks far down a road let the
-            // dashes of a lane line alias into two blurred streaks running apart like an
-            // arrow - one line near, two further off, seen on every long straight)
-            anisotropy: options.anisotropy.clamp(1, 8),
+            // (16x was held at 8x once, for lane-line dashes far down a road seen to alias
+            // into two streaks running apart like an arrow; Spandau's Heerstrasse at 8x and
+            // 16x showed none of it - 16x kept the far dashes narrow where 8x smeared them
+            // sideways - so 16x is the player's choice again, 8x the default)
+            anisotropy: options.anisotropy.clamp(1, 16),
             ..options
         };
         let bc = device
@@ -3875,6 +3890,7 @@ impl Renderer {
             shadow_sampler,
             shadow_layout,
             shadow_pipelines,
+            shadow_blobs: options.shadow_blobs,
             options,
             gpu_error,
             env_heading: Default::default(),
@@ -4137,24 +4153,17 @@ impl Renderer {
 
     pub fn add_blank_texture(&self, scene: &mut Scene, width: u32, height: u32) -> TextureId {
         let (width, height) = (width.max(1), height.max(1));
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&Default::default());
-        scene.textures.push(GpuTexture {
-            texture,
-            view,
-            size: (width, height),
-            bytes: texture_bytes(wgpu::TextureFormat::Rgba8UnormSrgb, width, height, 1),
-            gen: next_gen(),
-        });
+        // A newly allocated GPU texture has undefined contents. Script displays may be
+        // sampled before their first `STUnlock`, so initialise them as transparent rather
+        // than briefly showing arbitrary solid pixels on new or AI vehicles.
+        let image = omsi_texture::Image {
+            width,
+            height,
+            rgba: vec![0; (width * height * 4) as usize],
+            has_alpha: true,
+        };
+        let texture = upload_texture(&self.device, &self.queue, &image, false);
+        scene.textures.push(texture);
         scene.textures.len() - 1
     }
 
@@ -5427,6 +5436,7 @@ impl Renderer {
             object_radius: 0.0,
             detail: 1.0,
             any_distance: false,
+            near_only: None,
             mirror_only: false,
             omsi_caster: false,
             ordered: false,
@@ -5477,6 +5487,7 @@ impl Renderer {
             object_radius: 0.0,
             detail: 1.0,
             any_distance: false,
+            near_only: None,
             mirror_only: false,
             omsi_caster: false,
             ordered: false,
@@ -5662,6 +5673,12 @@ impl Renderer {
         i.object_radius = radius.max(0.0);
         i.detail = if detail > 0.0 { detail } else { 1.0 };
         i.any_distance = any_distance;
+    }
+
+    /// Draw an instance only while the camera stands in `area` (world x0, y0, x1, y1 on the
+    /// ground; None: wherever it is loaded).
+    pub fn set_near_only(&self, scene: &mut Scene, instance: usize, area: Option<[f64; 4]>) {
+        scene.instances[instance].near_only = area;
     }
 
     /// Change an instance transform (re-uploaded on the next `prepare`).
@@ -7848,6 +7865,16 @@ impl Renderer {
             if m.ranges.is_empty() || !inst.visible || (inst.mirror_only && main_view) {
                 return None;
             }
+            if let Some([x0, y0, x1, y1]) = inst.near_only {
+                let c = camera.position;
+                if c.x < x0 || c.x > x1 || c.y < y0 || c.y > y1 {
+                    return None;
+                }
+            }
+            // OMSI's `[isshadow]` shadow blobs, switched off (see `RenderOptions::shadow_blobs`)
+            if inst.blob && !self.shadow_blobs {
+                return None;
+            }
             let (c, r) = Self::bounding_sphere(scene, inst);
             let v = view.transform_point3(c);
             let z = -v.z; // distance along the view direction
@@ -8316,6 +8343,13 @@ impl Renderer {
             list.extend(pre_list);
             prepass_batches = pre_batches;
         }
+        // OMSI_SKIP_PIPE=3,1: leave pipeline kinds out of the main pass (0 opaque, 1 alpha
+        // tested, 2 blended, 3 blended without depth writes, 4 surface depth) - with
+        // OMSI_GPU_TIMERS_RAW, what each kind costs the GPU
+        if let Ok(skip) = omsi_cfg::env::var("OMSI_SKIP_PIPE") {
+            let skip: Vec<u8> = skip.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            main_batches.retain(|b| !skip.contains(&(b.pipe / 4)));
+        }
         if debug_draws {
             log::info!("  main pass: {} opaque/alpha-tested and {} blended draws in {} batches; prepass {} batches; draw list {} entries", main_draws[0], main_draws[1], main_batches.len(), prepass_batches.len(), list.len());
         }
@@ -8345,17 +8379,24 @@ impl Renderer {
         }
         if self.profiling && with_overlays && self.draw_audit_at.elapsed().as_secs() >= 10 {
             self.draw_audit_at = std::time::Instant::now();
-            let mut assets: HashMap<&str, (usize, usize)> = HashMap::new();
+            // (batches, draws, triangles) per asset: what the CPU encodes and what the GPU
+            // goes through
+            let mut assets: HashMap<&str, (usize, usize, u64)> = HashMap::new();
             for b in &main_batches {
                 let source = scene.meshes[b.mesh as usize].source.as_deref().unwrap_or("procedural / vehicle");
                 let cost = assets.entry(source).or_default();
                 cost.0 += 1;
                 cost.1 += b.instances.len();
+                cost.2 += b.count as u64 / 3 * b.instances.len() as u64;
             }
             let mut assets: Vec<_> = assets.into_iter().collect();
             assets.sort_unstable_by(|a, b| b.1.0.cmp(&a.1.0).then(a.0.cmp(b.0)));
-            for (source, (batches, draws)) in assets.into_iter().take(12) {
-                log::info!("draw audit: {batches} batches, {draws} draws: {source}");
+            for (source, (batches, draws, tris)) in assets.iter().take(12) {
+                log::info!("draw audit: {batches} batches, {draws} draws, {tris} triangles: {source}");
+            }
+            assets.sort_unstable_by(|a, b| b.1.2.cmp(&a.1.2).then(a.0.cmp(b.0)));
+            for (source, (batches, draws, tris)) in assets.iter().take(12) {
+                log::info!("triangle audit: {tris} triangles in {draws} draws ({batches} batches): {source}");
             }
         }
         stage(self, "items", "mirror.items");

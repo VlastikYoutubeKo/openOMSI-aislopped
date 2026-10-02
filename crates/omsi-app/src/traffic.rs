@@ -529,6 +529,9 @@ pub struct Traffic {
     rng: u64,
     /// Target number of cars around the camera.
     pub target: usize,
+    /// Made only so that the light programs run (no traffic, no timetable): nobody is put
+    /// on the roads - no aircraft, no parked car pulling out - while `target` is 0.
+    pub lights_only: bool,
     pub spawn_radius: f64,
     pub time: f32,
     /// Renders of cars that have gone, given back at the next `sync`.
@@ -1184,6 +1187,7 @@ impl Traffic {
             dormant_time: 0.0,
             rng: 0x9E37_79B9_7F4A_7C15,
             target,
+            lights_only: false,
             spawn_radius: 400.0,
             time: 0.0,
             released: Vec::new(),
@@ -1890,6 +1894,12 @@ impl Traffic {
             self.initial = false;
             return;
         }
+        // made only for the lights: nothing new while the target is 0, but the cars of a
+        // target raised and lowered again go as they do anywhere (returning before the loop
+        // above, they stood at the map's edge and drove over unloaded tiles for good)
+        if self.lights_only && self.target == 0 {
+            return;
+        }
         // aircraft: a few on the flight paths, independent of the street target
         let has_air = self.types.iter().any(|t| t.2 == LaneKind::Air);
         // the map's traffic density by hour (and group) scales the street traffic ...
@@ -2278,19 +2288,35 @@ impl Traffic {
                 while d.s > self.net.lanes[d.lane].length() && guard < 32 {
                     guard += 1;
                     let l = &self.net.lanes[d.lane];
-                    let options: Vec<usize> = l
-                        .next
-                        .iter()
-                        .copied()
-                        .filter(|&n| {
-                            let nl = &self.net.lanes[n];
-                            nl.kind == d.kind && nl.allows(d.ty.def.ai_veh_type) && self.types.iter().find(|t| Arc::ptr_eq(&t.0, &d.ty))
-                                .map(|t| match self.group_uvg[t.3] {
-                                    Some(pool) => nl.pool_density(&self.uvg_defaults, pool),
+                    // the ways a car on the road would take (`AiState::choose_after`): those
+                    // of its group, else those open to cars, else any - only where the
+                    // network ends does it leave the map (filtering by its group alone, the
+                    // trucks of Spandau were gone at the first junction whose turn has no
+                    // `trucks` rule, and hardly one of them ever came into range)
+                    let pool = self.types.iter().find(|t| Arc::ptr_eq(&t.0, &d.ty)).and_then(|t| self.group_uvg[t.3]);
+                    let same_kind = |n: &usize| self.net.lanes[*n].kind == d.kind;
+                    let open = |pooled: bool| -> Vec<usize> {
+                        l.next
+                            .iter()
+                            .copied()
+                            .filter(same_kind)
+                            .filter(|&n| {
+                                let nl = &self.net.lanes[n];
+                                let density = match pool.filter(|_| pooled) {
+                                    Some(p) => nl.pool_density(&self.uvg_defaults, p),
                                     None => nl.density,
-                                }).unwrap_or(nl.density) > 0.0
-                        })
-                        .collect();
+                                };
+                                nl.allows(d.ty.def.ai_veh_type) && density > 0.0
+                            })
+                            .collect()
+                    };
+                    let mut options = if pool.is_some() { open(true) } else { Vec::new() };
+                    if options.is_empty() {
+                        options = open(false);
+                    }
+                    if options.is_empty() {
+                        options = l.next.iter().copied().filter(same_kind).collect();
+                    }
                     if options.is_empty() {
                         gone = true;
                         break;
