@@ -341,6 +341,7 @@ pub(crate) struct App {
     /// The current METAR receiver is a single manual fetch rather than the continuous sync.
     pub(crate) metar_once: bool,
     pub(crate) metar_next: f64,
+    pub(crate) tomorrow: crate::weather_tomorrow::Tomorrow,
     /// The mouse cursor currently shows the hand (it is over a switch).
     pub(crate) cursor_kind: u8,
     pub(crate) settings: settings::Settings,

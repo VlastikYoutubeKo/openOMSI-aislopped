@@ -107,6 +107,7 @@ mod startup;
 mod traffic_link;
 mod tutorial;
 mod weather_setup;
+mod weather_tomorrow;
 mod weather_cycle;
 mod weather_model;
 mod world_load;
@@ -613,6 +614,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         metar_rx: None,
         metar_once: false,
         metar_next: 0.0,
+        tomorrow: Default::default(),
         cursor_kind: 0,
         settings,
         lan: None,

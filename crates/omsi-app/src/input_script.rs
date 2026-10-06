@@ -3242,7 +3242,7 @@ impl App {
     /// The weather follows the METAR report and cannot be changed (the `metar_sync` setting).
     /// In a LAN session as a client the host's weather counts: the host syncs, not us.
     pub(crate) fn metar_locked(&self) -> bool {
-        self.settings.metar_sync && !self.lan.as_ref().is_some_and(|l| l.role == omsi_net::Role::Client)
+        self.settings.metar_sync && !crate::weather_tomorrow::selected(self.args.weather.as_deref()) && !self.lan.as_ref().is_some_and(|l| l.role == omsi_net::Role::Client)
     }
 
     /// The airport whose report the sync follows: the one chosen, else the one of the weather
@@ -3299,6 +3299,7 @@ impl App {
     /// The METAR sync: with it on, the report is downloaded in the background (at once, then
     /// every ten minutes) and the weather goes over to it; `dt` is real seconds.
     pub(crate) fn tick_metar(&mut self, dt: f32) {
+        if crate::weather_tomorrow::selected(self.args.weather.as_deref()) { return; }
         self.share_start_metar();
         if let Some(rx)=self.metar_rx.as_ref(){
             match rx.try_recv(){

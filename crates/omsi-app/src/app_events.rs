@@ -1864,6 +1864,7 @@ impl ApplicationHandler for App {
                 }
                 // (the METAR sync: the report's weather, in real time)
                 self.tick_metar(dt);
+                self.tick_tomorrow();
                 if !self.paused {
                     // (the time speed: the settings', or the session's in LAN play)
                     let speed = self.time_speed();

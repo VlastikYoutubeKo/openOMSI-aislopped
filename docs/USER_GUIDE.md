@@ -491,6 +491,13 @@ and buses inside the archives.
 
 ## Season and weather
 
+**Tomorrow.io map weather** is an opt-in mode driven by the nearest configured
+area while driving. Each player supplies a private key; maps contain only areas
+and GPS coordinates. See the [player setup and map-author tutorial](WEATHER_REGIONS.md)
+and the included offline editor under `tools/weather-regions/`. The planned
+[community-hosted editor](https://openomsi.mxnticek.eu/weather/) is a separate
+deployment; local HTML works without it.
+
 The launcher's Departure card has a **Season** choice (spring / summer / autumn / winter,
 or by the date as in the original). Choosing one moves the date into that season, so the
 timetable and holidays follow, passes `--season` to the game (which picks the map's
