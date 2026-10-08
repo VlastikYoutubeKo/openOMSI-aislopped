@@ -18,6 +18,8 @@ Maps contain locations; each player supplies their own private API key.
 
 Environment overrides are `OMSI_TOMORROW_API_KEY` and `OMSI_TOMORROW_KEY_FILE`.
 Never include a key in the map config, a shared preset or an issue report.
+Only the configured map area's coordinates and your API key are sent to Tomorrow.io,
+never the player's position.
 Missing config/key or failed downloads preserve fallback/current weather and
 show a message. Switching to a custom weather preset ends this mode.
 
@@ -83,8 +85,11 @@ rejected credentials pause requests for an hour. Requests run outside the frame
 thread, have an 8 s timeout and do not follow redirects. The key is sent in the
 `apikey` header and is excluded from configs, cache contents and error messages.
 
-Weather transitions blend over 60 simulation seconds. Precipitation intensity
-is an approximation for OMSI's scale; snowfall does not infer snow cover.
+Weather transitions blend over 60 simulation seconds through the same apply step
+as METAR, updating ambient temperature and the snow state. The adapter passes
+measured precipitation rates, visibility and cloud cover to the weather model;
+the model determines visual intensity, and the existing surface model wets and
+dries roads over time. Falling snow does not establish historical road snow depth.
 Tomorrow.io takes precedence over METAR sync. A LAN client follows the host and
 does not fetch weather. Dedicated-server operation and LAN-host startup still
 need integration testing; this feature is intended for driving with a player bus.

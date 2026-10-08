@@ -424,11 +424,7 @@ pub(crate) fn cloud_drift_step(d: &mut [f32; 2], w: &omsi_content::weather::Weat
 /// How wet the roads are: rain soaks them in a few minutes, sunshine dries them in about
 /// twenty. `secs` is how long this weather has been running.
 pub(crate) fn road_wetness(rate: f32, secs: f64, start: f32) -> f32 {
-    if rate > 0.0 {
-        (start + secs as f32 * rate / 180.0).clamp(0.0, 1.0)
-    } else {
-        (start - secs as f32 / 1200.0).clamp(0.0, 1.0)
-    }
+    crate::weather_model::road_wetness(rate, secs, start)
 }
 
 /// The renderer's lighting for this weather at this moment: the daylight, then what the

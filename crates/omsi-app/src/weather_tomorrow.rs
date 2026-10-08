@@ -1,5 +1,5 @@
 //! Opt-in real weather: map groups select a location, never a credential.
-use crate::weather_setup::CustomWeather;
+use crate::weather_model::Observations;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -191,7 +191,7 @@ fn write_cache(path: &PathBuf, cache: &Cache) -> Result<(), &'static str> {
     .map_err(|_| "cannot save weather cache")?;
     std::fs::rename(&temp, path).map_err(|_| "cannot replace weather cache")
 }
-fn fetch(key: String, coord: &str, ttl: u64) -> Result<Cached, &'static str> {
+fn fetch(key: String, coord: &str, ttl: u64) -> Result<Loaded, &'static str> {
     let path = cache_path(&key).ok_or("no private cache directory")?;
     std::fs::create_dir_all(path.parent().unwrap())
         .map_err(|_| "cannot create private cache directory")?;
@@ -223,7 +223,7 @@ fn fetch(key: String, coord: &str, ttl: u64) -> Result<Cached, &'static str> {
         .get(coord)
         .filter(|c| time >= c.at && time - c.at < ttl)
     {
-        return Ok(c.clone());
+        return Loaded::parse(c.clone());
     }
     cache.reserve(time)?;
     // Persist the reservation before networking; failed calls count too.
@@ -266,13 +266,25 @@ fn fetch(key: String, coord: &str, ttl: u64) -> Result<Cached, &'static str> {
         .filter(|v| v.is_object())
         .ok_or("Tomorrow.io response has no weather values")?
         .clone();
-    weather(&values)?;
+    let observed = observations(&values)?;
     let cached = Cached { at: time, values };
     cache.values.insert(coord.into(), cached.clone());
     write_cache(&path, &cache)?;
-    Ok(cached)
+    Ok(Loaded { cached, observed })
 }
-fn weather(v: &Value) -> Result<CustomWeather, &'static str> {
+// Parsing stays on the worker, including a cache hit. The provider adapter
+// converts API units only; the weather model chooses the game representation.
+struct Loaded {
+    cached: Cached,
+    observed: Observations,
+}
+impl Loaded {
+    fn parse(cached: Cached) -> Result<Self, &'static str> {
+        let observed = observations(&cached.values)?;
+        Ok(Self { cached, observed })
+    }
+}
+fn observations(v: &Value) -> Result<Observations, &'static str> {
     let n = |key: &str| {
         v.get(key)
             .and_then(Value::as_f64)
@@ -280,53 +292,22 @@ fn weather(v: &Value) -> Result<CustomWeather, &'static str> {
             .map(|x| x as f32)
             .filter(|x| x.is_finite())
     };
-    let mut c = CustomWeather::default();
-    c.temp_c = n("temperature").ok_or("response has no valid temperature")?;
-    c.humidity = n("humidity").ok_or("response has no valid humidity")?;
-    c.wind_speed = n("windSpeed").ok_or("response has no valid wind speed")?;
-    c.wind_dir = n("windDirection").unwrap_or(0.0);
-    c.pressure = n("pressureSurfaceLevel")
-        .or_else(|| n("pressureSeaLevel"))
-        .unwrap_or(1013.0);
-    c.visibility_m = n("visibility").unwrap_or(50.0) * 1000.0;
-    let cover = n("cloudCover").unwrap_or(0.0);
-    c.cloud = if cover >= 85.0 {
-        4
-    } else if cover >= 65.0 {
-        3
-    } else if cover >= 35.0 {
-        2
-    } else if cover >= 10.0 {
-        1
-    } else {
-        0
-    };
-    c.cloud_base_m = n("cloudBase").map(|n| n * 1000.0).unwrap_or(1000.0);
-    let code = n("weatherCode").map(|n| n as u32).unwrap_or(1000);
-    let rain = n("rainIntensity").unwrap_or(0.0).max(0.0);
-    let snow = n("snowIntensity").unwrap_or(0.0).max(0.0);
-    let snowing = snow > 0.0 || matches!(code, 5000 | 5001 | 5100 | 5101 | 7000 | 7101 | 7102);
-    let raining = rain > 0.0
-        || matches!(
-            code,
-            4000 | 4001 | 4200 | 4201 | 6000 | 6001 | 6200 | 6201 | 8000
-        );
-    c.precip = if snowing {
-        2
-    } else if raining {
-        1
-    } else {
-        0
-    };
-    let intensity = if snowing { snow } else { rain };
-    c.precip_intensity = if c.precip == 0 {
-        0.0
-    } else {
-        (intensity / 10.0).clamp(0.05, 1.0) * 255.0
-    };
-    c.road_wetness = if c.precip == 0 { 0.0 } else { 0.5 };
-    c.normalize();
-    Ok(c)
+    Ok(Observations {
+        temperature_c: n("temperature").ok_or("response has no valid temperature")?,
+        humidity_percent: n("humidity").ok_or("response has no valid humidity")?,
+        wind: (
+            n("windDirection").unwrap_or(0.0),
+            n("windSpeed").ok_or("response has no valid wind speed")?,
+        ),
+        pressure_hpa: n("pressureSurfaceLevel")
+            .or_else(|| n("pressureSeaLevel"))
+            .unwrap_or(1013.0),
+        visibility_m: n("visibility").unwrap_or(50.0) * 1000.0,
+        cloud_cover: n("cloudCover").unwrap_or(0.0) / 100.0,
+        cloud_base_m: n("cloudBase").map(|n| n * 1000.0).unwrap_or(1000.0),
+        rain_mm_h: n("rainIntensity").unwrap_or(0.0),
+        snow_mm_h: n("snowIntensity").unwrap_or(0.0),
+    })
 }
 #[derive(Default)]
 pub(crate) struct Tomorrow {
@@ -335,10 +316,29 @@ pub(crate) struct Tomorrow {
     current: Option<usize>,
     ttl: u64,
     key: Option<String>,
-    receiver: Option<mpsc::Receiver<(String, Result<Cached, &'static str>)>>,
+    receiver: Option<mpsc::Receiver<(String, Result<Loaded, &'static str>)>>,
     check: Option<Instant>,
+    poll_at: Option<Instant>,
+    area_at: Option<Instant>,
+    fresh_until: Option<Instant>,
     applied: Option<(String, u64)>,
     disabled: bool,
+}
+impl Tomorrow {
+    fn poll_due(&mut self, time: Instant) -> bool {
+        if self.poll_at.is_some_and(|at| time < at) {
+            return false;
+        }
+        self.poll_at = Some(time + Duration::from_millis(250));
+        true
+    }
+    fn area_due(&mut self, time: Instant) -> bool {
+        if self.area_at.is_some_and(|at| time < at) {
+            return false;
+        }
+        self.area_at = Some(time + Duration::from_secs(1));
+        true
+    }
 }
 impl crate::App {
     pub(crate) fn tick_tomorrow(&mut self) {
@@ -352,12 +352,17 @@ impl crate::App {
             self.session.tomorrow = Default::default();
             return;
         }
+        let time = Instant::now();
+        if !self.session.tomorrow.poll_due(time) {
+            return;
+        }
         let Some(world) = self.world.as_ref() else {
             return;
         };
         if self.session.tomorrow.map.as_ref() != Some(&world.global.path) {
             self.session.tomorrow = Tomorrow {
                 map: Some(world.global.path.clone()),
+                poll_at: Some(time + Duration::from_millis(250)),
                 ..Default::default()
             };
             let rel = std::path::Path::new(&self.args.map)
@@ -424,11 +429,13 @@ impl crate::App {
         let Some(player) = self.player.as_ref() else {
             return;
         };
-        self.session.tomorrow.current = nearest(
-            &self.session.tomorrow.regions,
-            [player.vehicle.position.x, player.vehicle.position.y],
-            self.session.tomorrow.current,
-        );
+        if self.session.tomorrow.area_due(time) {
+            self.session.tomorrow.current = nearest(
+                &self.session.tomorrow.regions,
+                [player.vehicle.position.x, player.vehicle.position.y],
+                self.session.tomorrow.current,
+            );
+        }
         let Some(index) = self.session.tomorrow.current else {
             return;
         };
@@ -439,32 +446,31 @@ impl crate::App {
                     self.session.tomorrow.receiver = None;
                     match result {
                         Ok(c) if location == site => {
-                            if self.session.tomorrow.applied.as_ref() != Some(&(site.clone(), c.at))
+                            if self.session.tomorrow.applied.as_ref()
+                                != Some(&(site.clone(), c.cached.at))
                             {
-                                if let Ok(custom) = weather(&c.values) {
-                                    let name = format!(
-                                        "Tomorrow.io · {}",
-                                        self.session.tomorrow.regions[index].name
-                                    );
-                                    let mut to = custom.to_weather();
-                                    to.name = name.clone();
-                                    let from = self.session.weather.clone().unwrap_or_default();
-                                    self.session.weather_cycle = None;
-                                    self.session.weather_blend =
-                                        Some(crate::weather_cycle::Blend::new(from, to, 60.0));
-                                    if let Some(l) = self
-                                        .net
-                                        .lan
-                                        .as_mut()
-                                        .filter(|l| l.role == omsi_net::Role::Host)
-                                    {
-                                        l.set_weather(&custom.encode());
-                                    }
-                                    self.session.tomorrow.applied = Some((site.clone(), c.at));
-                                    self.service_msg = Some((name, 4.0));
-                                    log::info!("Tomorrow.io weather applied: group {}, temperature {:.1} C, wind {:.1} m/s",self.session.tomorrow.regions[index].name,custom.temp_c,custom.wind_speed);
-                                }
+                                let name = format!(
+                                    "Tomorrow.io · {}",
+                                    self.session.tomorrow.regions[index].name
+                                );
+                                let mut to = c.observed.weather(self.session.wetness);
+                                to.name = name;
+                                let wire = crate::weather_setup::CustomWeather::from_weather(
+                                    &to,
+                                    1.0,
+                                    self.session.wetness,
+                                )
+                                .encode();
+                                self.apply_report_weather(to, None, &wire);
+                                self.session.tomorrow.applied = Some((site.clone(), c.cached.at));
                             }
+                            let remaining = self
+                                .session
+                                .tomorrow
+                                .ttl
+                                .saturating_sub(now().saturating_sub(c.cached.at));
+                            self.session.tomorrow.fresh_until =
+                                Some(time + Duration::from_secs(remaining));
                             self.session.tomorrow.check =
                                 Some(Instant::now() + Duration::from_secs(5));
                         }
@@ -495,8 +501,13 @@ impl crate::App {
                 .tomorrow
                 .applied
                 .as_ref()
-                .is_some_and(|(c, t)| {
-                    *c == site && now() >= *t && now() - *t < self.session.tomorrow.ttl
+                .is_some_and(|(c, _)| {
+                    *c == site
+                        && self
+                            .session
+                            .tomorrow
+                            .fresh_until
+                            .is_some_and(|at| time < at)
                 })
         {
             return;
@@ -516,6 +527,17 @@ impl crate::App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn frame_timers_throttle_response_and_anchor_work() {
+        let mut state = Tomorrow::default();
+        let time = Instant::now();
+        assert!(state.poll_due(time));
+        assert!(!state.poll_due(time + Duration::from_millis(1)));
+        assert!(state.poll_due(time + Duration::from_millis(250)));
+        assert!(state.area_due(time));
+        assert!(!state.area_due(time + Duration::from_millis(250)));
+        assert!(state.area_due(time + Duration::from_secs(1)));
+    }
     #[test]
     fn shared_sites_and_boundary_hysteresis() {
         assert_eq!(coord(50.0, 14.0), coord(50.00000001, 14.00000001));
@@ -552,13 +574,16 @@ mod tests {
     #[test]
     fn response_uses_metric_units_and_rejects_missing_values() {
         let v = serde_json::json!({"temperature":12,"humidity":80,"windSpeed":6.6,"windDirection":370,"visibility":2,"cloudCover":90,"weatherCode":5101,"snowIntensity":2});
-        let c = weather(&v).unwrap();
-        assert_eq!(c.wind_speed, 6.6);
-        assert_eq!(c.wind_dir, 10.0);
-        assert_eq!(c.visibility_m, 2000.0);
-        assert_eq!(c.precip, 2);
-        assert_eq!(c.cloud, 4);
-        assert!(weather(&serde_json::json!({"temperature":12})).is_err());
+        let observed = observations(&v).unwrap();
+        assert_eq!(observed.snow_mm_h, 2.0);
+        assert_eq!(observed.cloud_cover, 0.9);
+        let c = observed.weather(0.0);
+        assert_eq!(c.wind.1, 6.6);
+        assert_eq!(c.wind.0, 10.0);
+        assert_eq!(c.fog.0, 2000.0);
+        assert_eq!(c.precip[0], 2.0);
+        assert_eq!(c.clouds.0, "Overcast 1");
+        assert!(observations(&serde_json::json!({"temperature":12})).is_err());
     }
     #[test]
     fn cfg_rejects_credentials_duplicates_and_invalid_coordinates() {
