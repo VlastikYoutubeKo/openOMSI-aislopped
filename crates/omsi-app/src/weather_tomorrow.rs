@@ -151,7 +151,8 @@ fn now() -> u64 {
 fn cache_path(key: &str) -> Option<PathBuf> {
     use sha2::{Digest, Sha256};
     let hash = format!("{:x}", Sha256::digest(key.as_bytes()));
-    let base = std::env::var_os("OMSI_TOMORROW_CACHE_DIR")
+    let base = omsi_cfg::flags::OMSI_TOMORROW_CACHE_DIR
+        .live_os()
         .map(PathBuf::from)
         .or_else(|| {
             crate::settings::Settings::path()
@@ -160,10 +161,12 @@ fn cache_path(key: &str) -> Option<PathBuf> {
     Some(base.join(format!("tomorrow-{}.json", &hash[..16])))
 }
 fn credential() -> Option<String> {
-    let key = omsi_cfg::env::var("OMSI_TOMORROW_API_KEY")
-        .ok()
+    let key = omsi_cfg::flags::OMSI_TOMORROW_API_KEY
+        .var()
+        .map(str::to_owned)
         .or_else(|| {
-            let path = omsi_cfg::env::var_os("OMSI_TOMORROW_KEY_FILE")
+            let path = omsi_cfg::flags::OMSI_TOMORROW_KEY_FILE
+                .os()
                 .map(PathBuf::from)
                 .or_else(|| {
                     crate::settings::Settings::path()

@@ -332,6 +332,9 @@ effect. On Android, `openOMSI/env.txt` holds `NAME=value` lines that are set bef
 | `OMSI_PRESENCE_URL` | text | built-in | use | app | Base URL of the presence ("playing now") service. |
 | `OMSI_ROOT` | text | found | use | app, launcher-core, o3d, sim | The OMSI 2 installation folder (also the content root for tests that need real content). |
 | `OMSI_SAFE_GPU` | num | 0 | use | app | Restarts after a lost graphics device: lighter on the card each time. Set at runtime on Android and by the restart. |
+| `OMSI_TOMORROW_API_KEY` | text | private key file | use | app | Private Tomorrow.io API key for map-selected weather; never include it in map configs or logs. |
+| `OMSI_TOMORROW_CACHE_DIR` | text | settings/weather-cache | use | app | Private Tomorrow.io response cache and shared request-budget directory. |
+| `OMSI_TOMORROW_KEY_FILE` | text | settings/tomorrow-api-key.txt | use | app | Private text file containing the player's Tomorrow.io API key. |
 | `OMSI_UPDATE_URL` | text | built-in | use | app | Another release description (URL or file:///...json) for the update check. |
 | `OMSI_WINE` | text | PATH | use | plugin | The Wine binary for Windows plugins. |
 
