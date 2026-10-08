@@ -115,6 +115,7 @@ mod startup;
 mod traffic_link;
 mod tutorial;
 mod weather_setup;
+mod weather_tomorrow;
 mod weather_cycle;
 mod weather_model;
 mod world_load;
@@ -561,6 +562,7 @@ fn assemble_app(args: Args, settings: settings::Settings) -> App {
             metar_rx: None,
             metar_once: false,
             metar_next: 0.0,
+            tomorrow: Default::default(),
         },
         menus: MenuState {
             chooser: None,

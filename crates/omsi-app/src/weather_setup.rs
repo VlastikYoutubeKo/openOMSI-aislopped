@@ -114,6 +114,13 @@ pub(crate) fn custom_weather(text:Option<&str>)->Option<CustomWeather>{text.and_
 
 /// Weather from `--weather`, else the clear-sky default.
 pub(crate) fn load_weather(args: &Args) -> omsi_content::weather::Weather {
+    if crate::weather_tomorrow::selected(args.weather.as_deref()) {
+        crate::weather_model::stop();
+        scene::SNOW_WEATHER.store(false, std::sync::atomic::Ordering::Relaxed);
+        let w = CustomWeather::default().to_weather();
+        omsi_sim::host::set_ambient_weather(w.temp.0, w.temp.1);
+        return w;
+    }
     // no weather chosen, or `natural`: the physical model (weather_model.rs)
     if crate::weather_model::is_natural(args.weather.as_deref()) {
         let w = crate::weather_model::start(&crate::situation::start_clock(args));

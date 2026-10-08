@@ -1987,6 +1987,7 @@ fn weather_files() -> Vec<String> {
         .collect();
     files.sort_by(|a, b| bus_cmp(a.trim_start_matches("Weather/").trim_start_matches('#'), b.trim_start_matches("Weather/").trim_start_matches('#')));
     files.dedup();
+    files.insert(0, "tomorrow".into());
     files
 }
 
