@@ -1037,7 +1037,7 @@ fn read_vehicle_folder(folder: &str, dirs: &[PathBuf], lang: &str) -> (Vec<Vehic
         if !missing_packs.is_empty() {
             log_line(&format!("vehicles: {} borrows parts from packs that are not installed: {}", f.display(), missing_packs.join(", ")));
         }
-        out.push(VehicleInfo { name: if name.is_empty() { stem.clone() } else { name }, manufacturer: v.manufacturer.trim().to_string(), type_name: v.type_name.trim().to_string(), file: rel, folder: folder.to_string(), description: description.chars().take(600).collect(), default_paint: v.default_paint.trim().to_string(), paints, hofs, installed: in_content(f), missing_packs, numbers: v.numbers_with_plates() });
+        out.push(VehicleInfo { name: if name.is_empty() { stem.clone() } else { name }, manufacturer: v.manufacturer.trim().to_string(), type_name: v.type_name.trim().to_string(), file: rel, folder: folder.to_string(), description, default_paint: v.default_paint.trim().to_string(), paints, hofs, installed: in_content(f), missing_packs, numbers: v.numbers_with_plates() });
     }
     deps.sort();
     deps.dedup();
@@ -2055,6 +2055,10 @@ pub fn settings_from_text(text: Option<&str>) -> Value {
     v["look_smoothing_ms"] = json!(0.0);
     v["pad_steer_smooth"] = json!(120.0);
     v["pad_steer_linear"] = json!(false);
+    v["pad_steer_speed"] = json!(2.0);
+    v["pad_deadzone"] = json!(0.08);
+    v["pad_type"] = json!("auto");
+    v["pad_buttons"] = json!(true);
     v["arrows_switch_cams"] = json!(false);
     v["steer_look_response"] = json!(0.25);
     v["head_idle"] = json!(0.0);
@@ -2125,7 +2129,10 @@ pub fn settings_from_text(text: Option<&str>) -> Value {
             "wheel_range" => v[&k] = json!(val.parse::<f64>().unwrap_or(900.0).clamp(90.0, 2880.0)),
             "wheel_lock" => v[&k] = json!(val.parse::<f64>().map(|x| if x < 45.0 { 0.0 } else { x.min(2880.0) }).unwrap_or(0.0)),
             "fov" => v[&k] = json!(val.parse::<f64>().map(|x| if x < 20.0 { 0.0 } else { x.min(120.0) }).unwrap_or(0.0)),
-            "camera_collision" | "right_stick_look" | "pad_steer_linear" | "arrows_switch_cams" | "steer_look" | "head_tracking" | "head_tracking_invert_yaw" | "head_tracking_invert_pitch" | "head_tracking_invert_roll" | "head_tracking_invert_x" | "head_tracking_invert_y" | "head_tracking_invert_z" | "discord_status" | "voice_chat" | "launcher_rest" => v[&k] = json!(b(val)),
+            "pad_steer_speed" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.8, 5.0)).unwrap_or(2.0)),
+            "pad_deadzone" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 0.4)).unwrap_or(0.08)),
+            "pad_type" => v[&k] = json!(match val.trim().to_ascii_lowercase().as_str() { "xbox" => "xbox", "ps4" => "ps4", "ps5" => "ps5", _ => "auto" }),
+            "camera_collision" | "right_stick_look" | "pad_steer_linear" | "pad_buttons" | "arrows_switch_cams" | "steer_look" | "head_tracking" | "head_tracking_invert_yaw" | "head_tracking_invert_pitch" | "head_tracking_invert_roll" | "head_tracking_invert_x" | "head_tracking_invert_y" | "head_tracking_invert_z" | "discord_status" | "voice_chat" | "launcher_rest" => v[&k] = json!(b(val)),
             // (how much of the mip chain an LED panel is held at, 0..4; a file from before
             // it was a number says 1 or 0)
             "led_mips" => v[&k] = json!(val.trim().parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 4.0)).unwrap_or(1.3)),
@@ -2203,13 +2210,50 @@ pub fn tutorials() -> Vec<(usize, String, String)> {
                 _ => {}
             }
         }
-        let text = text.replace("&quot;", "\"").replace("&amp;", "&").replace("&nbsp;", " ");
+        let text = decode_html_entities(&text);
         let mut lines = text.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|l| !l.is_empty());
         let title = lines.next().unwrap_or_default();
         let rest: Vec<String> = lines.collect();
         out.push((n, title, rest.join("\n")));
     }
     out
+}
+
+/// Decode the HTML entities used in OMSI's tutorial pages before drawing plain text.
+pub fn decode_html_entities(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut remaining = input;
+    while let Some(start) = remaining.find('&') {
+        output.push_str(&remaining[..start]);
+        remaining = &remaining[start..];
+        let Some(end) = remaining.find(';').filter(|&end| end <= 12) else {
+            output.push('&');
+            remaining = &remaining[1..];
+            continue;
+        };
+        let entity = &remaining[1..end];
+        let decoded = match entity {
+            "amp" => Some('&'), "quot" => Some('"'), "apos" | "#39" => Some('\''),
+            "lt" => Some('<'), "gt" => Some('>'), "nbsp" => Some(' '),
+            "auml" => Some('ä'), "ouml" => Some('ö'), "uuml" => Some('ü'),
+            "Auml" => Some('Ä'), "Ouml" => Some('Ö'), "Uuml" => Some('Ü'),
+            "szlig" => Some('ß'), "ndash" => Some('–'), "mdash" => Some('—'),
+            "bull" => Some('•'), "deg" => Some('°'),
+            _ => entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X"))
+                .and_then(|n| u32::from_str_radix(n, 16).ok())
+                .or_else(|| entity.strip_prefix('#').and_then(|n| n.parse().ok()))
+                .and_then(char::from_u32),
+        };
+        // (the English pages have zero-width spaces, `&#8203;`: the font has no glyph for them)
+        match decoded {
+            Some('\u{200b}') => {}
+            Some(c) => output.push(c),
+            None => output.push_str(&remaining[..=end]),
+        }
+        remaining = &remaining[end + 1..];
+    }
+    output.push_str(remaining);
+    output
 }
 
 /// OMSI's option presets (`option_presets/*.oop`): their names and what they say, in the
@@ -2491,6 +2535,8 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
     let mut text = text;
     text.push_str(&format!("right_stick_look={}\n", b("right_stick_look", true)));
     text.push_str(&format!("pad_steer_linear={}\n", b("pad_steer_linear", false)));
+    text.push_str(&format!("pad_steer_speed={}\npad_deadzone={}\npad_buttons={}\n", f("pad_steer_speed", 2.0).clamp(0.8, 5.0), f("pad_deadzone", 0.08).clamp(0.0, 0.4), b("pad_buttons", true)));
+    text.push_str(&format!("pad_type={}\n", match v.get("pad_type").and_then(|x| x.as_str()).unwrap_or("auto") { t @ ("xbox" | "ps4" | "ps5") => t, _ => "auto" }));
     text.push_str(&format!("arrows_switch_cams={}\n", b("arrows_switch_cams", false)));
     text.push_str(&format!("resolution={}\n", resolution_text(v.get("resolution").and_then(|x| x.as_str()).unwrap_or("auto"))));
     text.push_str(&format!("gpu_texture_compression={}\n", b("gpu_texture_compression", true)));

@@ -26,6 +26,7 @@ pub(crate) fn traffic_tick(
 ) {
     t.others = lan_outlines(remotes);
     t.others.extend(own_outlines(player, placed));
+    t.other_blinkers = outline_indicators(remotes, player, placed);
     if !paused {
         t.player_priority = player.and_then(|p| p.vehicle.var("TrafficPriority")).is_some_and(|v| v > 0.5);
         t.player_blinker = player.map(|p| lan::indicator(&p.vehicle)).unwrap_or(0);
@@ -268,7 +269,8 @@ pub(crate) fn career_from_humans(career: &mut career::Career, h: &humans::Humans
 /// driver's timetable paper.
 /// `game_clock`: the clock the journey's head line is written with (none: the bus's own).
 /// `learn_loaded`: the stops of the tiles loaded are learnt first. `plugin_events`: where
-/// skipped stops are told to the plugins (none: they are not taken).
+/// skipped stops and the end of a trip are told to the plugins (none: a trip's end is
+/// dropped, the skipped stops are kept).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn duty_step(
     d: &mut schedule::PlayerDuty,
@@ -293,6 +295,12 @@ pub(crate) fn duty_step(
     }
     let due = (d.trip_index, d.next_stop);
     let served = d.update(&mut p.vehicle, time);
+    // (also one ended between frames: the last stop skipped from the menu; a trip reopened
+    // by a page counts from its start again, and its next end is told too)
+    if let Some(run) = d.take_reopened() {
+        career.trip_reopened(run);
+    }
+    let ended = d.take_finished();
     if let Some((arrival, departure)) = served {
         career.stop_served(arrival, departure);
     }
@@ -302,11 +310,19 @@ pub(crate) fn duty_step(
         crate::journey::note(journey, d, due, served, root, || crate::journey::head(career, &world.global.name, &p.vehicle, clock));
     }
     if let Some(events) = plugin_events {
+        use omsi_plugin::InfoValue::{Num, Text};
         if let Some((count, due_at, at)) = d.take_skipped() {
-            use omsi_plugin::InfoValue::Num;
             crate::plugins::queue_event(events, "stops_skipped", vec![Num(count as f64), Num(due_at as f64), Num(at as f64)]);
         }
+        // the trip over, rated before the next one starts its ratings afresh (none for a
+        // trip the bus was never driven on: a duty taken at its last stop)
+        if let Some(f) = ended {
+            if let Some([driving, comfort, tickets]) = career.trip_ended(f.run) {
+                crate::plugins::queue_event(events, "trip_done", vec![Num(f.index as f64 + 1.0), Text(f.how.as_str().into()), Num(driving), Num(comfort), Num(tickets)]);
+            }
+        }
     }
+    career.trip_driven(d.trip_run());
     if d.take_trip_change() && p.duty_typed {
         let (trip, stop) = d.trip_for_ibis();
         p.set_duty_destination(trip, stop);

@@ -124,6 +124,7 @@ impl TrafficSim {
             player_signalling: 0.0,
             way_users: Vec::new(),
             others: Vec::new(),
+            other_blinkers: HashMap::new(),
             tick_split: [0.0; 3],
             others_still: HashMap::new(),
             geo_prev: Vec::new(),
@@ -135,6 +136,7 @@ impl TrafficSim {
             mirror: false,
             count_near: None,
             lan_centers: Vec::new(),
+            lan_eyes: Vec::new(),
             retired: Vec::new(),
         };
         t.sort_parked(parked_cars, lanes);

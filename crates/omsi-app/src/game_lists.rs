@@ -941,6 +941,7 @@ pub(crate) fn run_move(app: &mut App, kind: &ListKind, action: &str, mv: Move) -
                 Some((pos, heading)) => {
                     crate::admin::teleport(app, pos, heading);
                     app.service_msg = Some(("The bus stands at the start point".into(), 3.0));
+                    app.service_event("teleport", app.menu_by(), None);
                 }
                 None => app.service_msg = Some(("That start point is not in the map".into(), 3.0)),
             }
@@ -1120,6 +1121,8 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
         "look_sens" => (2..=40).map(|v| v as f32 * 0.05).collect(),
         "look_smoothing_ms" => (0..=20).map(|v| v as f32 * 10.0).collect(),
         "pad_steer_smooth" => (0..=30).map(|v| v as f32 * 10.0).collect(),
+        "pad_steer_speed" => (8..=50).map(|v| v as f32 / 10.0).collect(),
+        "pad_deadzone" => (0..=40).map(|v| v as f32 * 0.01).collect(),
         "seat" => (-50..=50).map(|v| v as f32 / 100.0).collect(),
         "seat_pitch" => (-45..=45).map(|v| v as f32).collect(),
         "hour" => (0..24).map(|v| v as f32).collect(),
@@ -1250,6 +1253,8 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         "look_sens" => s.look_sens,
         "look_smoothing_ms" => s.look_smoothing_ms,
         "pad_steer_smooth" => s.pad_steer_smooth,
+        "pad_steer_speed" => s.pad_steer_speed,
+        "pad_deadzone" => s.pad_deadzone,
         "ui_scale" => s.ui_scale,
         "chat_size" => s.chat_size,
         "ui_opacity" => s.ui_opacity,
@@ -1356,6 +1361,14 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
         "pad_steer_smooth" => {
             app.settings.pad_steer_smooth = v.clamp(0.0, 300.0).round();
             Some(("pad_steer_smooth", app.settings.pad_steer_smooth.to_string()))
+        }
+        "pad_steer_speed" => {
+            app.settings.pad_steer_speed = (v.clamp(0.8, 5.0) * 10.0).round() / 10.0;
+            Some(("pad_steer_speed", app.settings.pad_steer_speed.to_string()))
+        }
+        "pad_deadzone" => {
+            app.settings.pad_deadzone = (v.clamp(0.0, 0.4) * 100.0).round() / 100.0;
+            Some(("pad_deadzone", app.settings.pad_deadzone.to_string()))
         }
         "look_smoothing_ms" => {
             app.settings.look_smoothing_ms = v.round();
@@ -1601,6 +1614,8 @@ fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "doppler" => s.doppler,
         "steering_linear" => s.steering_linear,
         "pad_steer_linear" => s.pad_steer_linear,
+        "pad_buttons" => s.pad_buttons,
+        "right_stick_look" => s.right_stick_look,
         "arrows_switch_cams" => s.arrows_switch_cams,
         "old_steering" => s.old_steering,
         "red_steer_spd" => s.red_steer_spd,
@@ -1873,6 +1888,14 @@ fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String
         "pad_steer_linear" => {
             app.settings.pad_steer_linear = on;
             Some(("pad_steer_linear", bit))
+        }
+        "pad_buttons" => {
+            app.settings.pad_buttons = on;
+            Some(("pad_buttons", bit))
+        }
+        "right_stick_look" => {
+            app.settings.right_stick_look = on;
+            Some(("right_stick_look", bit))
         }
         "arrows_switch_cams" => {
             app.settings.arrows_switch_cams = on;
@@ -2905,8 +2928,10 @@ fn switch_driver(app: &mut App, name: &str) {
     }
     let rel = format!("Drivers/{name}.odr");
     let mut next = crate::career::Career::load(&app.args.root, &rel);
-    // (the distance and the clock of the run go on; the counters start with the new file)
+    // (the distance and the clock of the run go on; the counters start with the new file;
+    // the bus's motion and the trip driven go on)
     next.seconds = app.session.career.seconds;
+    next.go_on_from(&mut app.session.career);
     app.session.career = next;
     app.args.driver = Some(rel);
     app.service_msg = Some((format!("Driver: {name}"), 3.0));
