@@ -4,6 +4,7 @@ pub mod atmosphere;
 pub mod clouds;
 mod passes;
 use passes::{Encoders, FrameArgs, FrameEnv, PassTimers, StageClock};
+pub mod pipeline_cache;
 mod pipelines;
 mod puddles;
 mod rt;
@@ -76,6 +77,13 @@ struct CameraUniform {
     /// Windy trees: xy the weather's wind (m/s, world; 0 with the setting off), zw how far
     /// the air has carried the gusts since the start (m, modulo the shaders' PATTERN_PERIOD).
     tree_wind: [f32; 4],
+    /// The rear section of the player's articulated vehicle as `inside_*` (w of the third
+    /// 0 without one): the weather stays out of it as well (#1967: it snowed and rained in
+    /// the back of an articulated bus). Last, so that the shaders that do not read it can
+    /// leave it out of their copy of this struct.
+    inside2_a: [f32; 4],
+    inside2_b: [f32; 4],
+    inside2_c: [f32; 4],
 }
 
 /// The period the sky's cloud patterns repeat with (m): 5 x the cloud field (14 km), 8 x
@@ -2745,6 +2753,10 @@ impl Renderer {
             // textures are decoded to RGBA by upload_texture on this device.
             required_features = wgpu::Features::empty();
         }
+        // the driver's compiled pipelines kept for the next start (Vulkan, OpenGL)
+        if !intel_vulkan_safe {
+            required_features |= pipeline_cache::wanted(&adapter);
+        }
         // Enhanced+: hardware ray queries where the device has them (Apple silicon from the
         // M3/A17 on, RTX and RDNA 2 cards and newer through Vulkan and Direct3D 12 - with DXC,
         // which the Windows build ships beside the game); OMSI_NO_RT=1 leaves them out. Should
@@ -2770,6 +2782,10 @@ impl Renderer {
             Some("nostorage") => ArrayPath::NoStorage,
             _ if !downlevel.contains(wgpu::DownlevelFlags::FRAGMENT_STORAGE) || storage < 2 => ArrayPath::NoStorage,
             _ if !downlevel.contains(wgpu::DownlevelFlags::VERTEX_STORAGE) || storage < 3 => ArrayPath::VertexTextures,
+            // (the draw list and the lamps' grid are arrays of u32, 4 bytes, which such a device
+            // cannot bind as storage buffers: ANGLE on Vulkan, an Exynos' Xclipse, failed the
+            // shadow pipeline with "a size that is a multiple of 16 bytes", #1857)
+            _ if !downlevel.contains(wgpu::DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED) => ArrayPath::NoStorage,
             _ => ArrayPath::Storage,
         };
         ARRAY_PATH.store(path as u8, std::sync::atomic::Ordering::Relaxed);
@@ -2796,6 +2812,7 @@ impl Renderer {
             .await
             .context("request_device")?;
         log::info!("graphics device opened; compiling renderer pipelines");
+        pipeline_cache::open(&device, &info);
         // the same choice wgpu-core makes when it validates a texture or a pipeline
         let adapter_table = device
             .features()
@@ -2865,6 +2882,7 @@ impl Renderer {
         }
         if let Some(why) = made.as_ref().ok().and_then(|r| r.device_lost()) {
             drop(made);
+            pipeline_cache::close(&device);
             if basic_pipelines() {
                 return Err(anyhow!("the graphics device was lost while the pipelines were made: {why}"));
             }
@@ -2873,6 +2891,10 @@ impl Renderer {
             // (and so from the start next time, see `fallback_load`)
             fallback_store(&name, Some((1, true)));
             return Box::pin(Self::new_on(adapter, surface, asked_format, asked_options)).await;
+        }
+        match &made {
+            Ok(_) => pipeline_cache::save(),
+            Err(_) => pipeline_cache::close(&device),
         }
         made
     }

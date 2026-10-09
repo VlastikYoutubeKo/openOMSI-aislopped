@@ -257,6 +257,7 @@ effect. On Android, `openOMSI/env.txt` holds `NAME=value` lines that are set bef
 | `OMSI_NO_MODEL_ORDER` | bool | off | use | app | Draw the opaque parts of ordered models first again (A/B). |
 | `OMSI_NO_MSAA_PREPASS` | bool | off | frame | render | No depth prepass with multisampling. |
 | `OMSI_NO_PBR` | bool | off | use | app | No PBR materials. |
+| `OMSI_NO_PIPELINE_CACHE` | bool | off | use | render | Compile every pipeline at each start (no ~/.openomsi/cache/pipelines-*.bin). |
 | `OMSI_NO_PLUGINS` | bool | off | use | app | No plugins loaded. |
 | `OMSI_NO_POLL_THREAD` | bool | off | use | render | No device poll thread. |
 | `OMSI_NO_PRESENCE` | bool | off | use | app | No presence ("playing now") service. |
@@ -332,6 +333,7 @@ effect. On Android, `openOMSI/env.txt` holds `NAME=value` lines that are set bef
 | `OMSI_PRESENCE_URL` | text | built-in | use | app | Base URL of the presence ("playing now") service. |
 | `OMSI_ROOT` | text | found | use | app, launcher-core, o3d, sim | The OMSI 2 installation folder (also the content root for tests that need real content). |
 | `OMSI_SAFE_GPU` | num | 0 | use | app | Restarts after a lost graphics device: lighter on the card each time. Set at runtime on Android and by the restart. |
+| `OMSI_SCREEN_AT` | text | - | once | app, launcher-core | x,y: the screen (a point on the desktop, pixels) the game window opens on; the launcher sets it to where it stands. |
 | `OMSI_TOMORROW_API_KEY` | text | private key file | use | app | Private Tomorrow.io API key for map-selected weather; never include it in map configs or logs. |
 | `OMSI_TOMORROW_CACHE_DIR` | text | settings/weather-cache | use | app | Private Tomorrow.io response cache and shared request-budget directory. |
 | `OMSI_TOMORROW_KEY_FILE` | text | settings/tomorrow-api-key.txt | use | app | Private text file containing the player's Tomorrow.io API key. |
